@@ -1,0 +1,67 @@
+{
+  "project_info": {
+    "project_number": "639260794813",
+    "project_id": "techmageddon-1st",
+    "storage_bucket": "techmageddon-1st.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:639260794813:android:9debbba67afc95bce77cd4",
+        "android_client_info": {
+          "package_name": "com.example.sprint_1"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBpFLhuzV4eYcxo2cCPZDffhLWNlRw17Do"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:639260794813:android:ba877a8d7f19ae45e77cd4",
+        "android_client_info": {
+          "package_name": "techmageddon.com.techmageddon_1st"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBpFLhuzV4eYcxo2cCPZDffhLWNlRw17Do"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:639260794813:android:2283a87019a810eae77cd4",
+        "android_client_info": {
+          "package_name": "techmageddon1stv2.com.example.techmageddon_1st_v2"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBpFLhuzV4eYcxo2cCPZDffhLWNlRw17Do"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
