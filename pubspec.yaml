@@ -64,6 +64,7 @@ flutter:
   assets:
     - assets/videos/sample.mp4
     - assets/images/text_sample.png
+    - assets/images/text_sample2.png
     - .env
 
   #   - images/a_dot_burr.jpeg
