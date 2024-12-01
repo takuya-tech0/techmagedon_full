@@ -13,7 +13,7 @@ class TextScreen extends StatelessWidget {
       child: SingleChildScrollView(
         padding: AppSpacing.paddingMD,
         child: const Image(
-          image: AssetImage('assets/images/text_sample2.png'),
+          image: AssetImage('assets/images/text_sample.png'),
           fit: BoxFit.contain,
         ),
       ),
