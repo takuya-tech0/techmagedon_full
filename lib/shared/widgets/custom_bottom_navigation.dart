@@ -32,12 +32,12 @@ class CustomBottomNavigation extends StatelessWidget {
           label: '講座一覧',
         ),
         BottomNavigationBarItem(
-          icon: Icon(Icons.collections_bookmark_outlined, size: 28),
-          label: '後で確認',
+          icon: Icon(Icons.smart_toy_outlined, size: 28),
+          label: 'AI相談',
         ),
         BottomNavigationBarItem(
-          icon: Icon(Icons.person_outline, size: 28),
-          label: 'マイページ',
+          icon: Icon(Icons.diversity_3_outlined, size: 28),
+          label: 'みんなの叡智',
         ),
       ],
       currentIndex: currentIndex,
