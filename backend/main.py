@@ -1,4 +1,4 @@
-# main.py
+# main.py - Full code with splitted endpoints and methods
 
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,15 +13,19 @@ from functools import lru_cache
 import openai
 import dotenv
 import logging
+import asyncio
 
 # Load environment variables
 dotenv.load_dotenv()
 
 # Setup logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
-# Config model
+
 class Settings:
     def __init__(self):
         self.MYSQL_HOST = os.getenv('MYSQL_HOST', 'tech0-db-step4-studentrdb-3.mysql.database.azure.com')
@@ -42,7 +46,7 @@ class Settings:
             'collation': 'utf8mb4_unicode_ci',
             'use_unicode': True
         }
-        
+
         if os.path.exists(self.SSL_CA):
             config.update({
                 'client_flags': [mysql.connector.ClientFlag.SSL],
@@ -54,14 +58,13 @@ class Settings:
                 pass
             else:
                 raise FileNotFoundError(f"SSL certificate required but not found: {self.SSL_CA}")
-        
+
         return config
 
 @lru_cache()
 def get_settings():
     return Settings()
 
-# Response Models
 class MaterialResponse(BaseModel):
     material_id: int
     unit_id: int
@@ -112,7 +115,6 @@ class ConversationDetail(BaseModel):
     conversation: ChatConversation
     messages: List[Message]
 
-# Request Models
 class ConversationCreateRequest(BaseModel):
     user_id: int
     unit_id: int
@@ -120,63 +122,95 @@ class ConversationCreateRequest(BaseModel):
 class MessageCreateRequest(BaseModel):
     conversation_id: int
     content: str
-    role: str  # 'user' or 'assistant'
+    role: str
+    is_first_message: bool = False
 
-# MySQL Connection Manager
+import mysql.connector
+from mysql.connector import Error
+from mysql.connector.cursor import MySQLCursor
+from contextlib import asynccontextmanager
+
 class MySQLManager:
     def __init__(self, config):
         self.config = config
         self._connection = None
         self._cursor = None
+        self._lock = asyncio.Lock()
 
-    def __enter__(self):
-        self.connect()
+    async def __aenter__(self):
+        await self.connect()
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.disconnect()
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.disconnect()
 
-    def connect(self):
+    async def connect(self):
         try:
-            if not self._connection or not self._connection.is_connected():
-                self._connection = mysql.connector.connect(**self.config)
-                self._cursor = self._connection.cursor(dictionary=True, buffered=True)
-                self._cursor.execute('SET NAMES utf8mb4')
-                self._cursor.execute('SET CHARACTER SET utf8mb4')
-                self._cursor.execute('SET character_set_connection=utf8mb4')
-                logger.info("MySQL データベースに接続しました")
+            async with self._lock:
+                if not self._connection or not self._connection.is_connected():
+                    self._connection = mysql.connector.connect(**self.config)
+                    self._cursor = self._connection.cursor(dictionary=True, buffered=True)
+                    self._cursor.execute('SET NAMES utf8mb4')
+                    self._cursor.execute('SET CHARACTER SET utf8mb4')
+                    self._cursor.execute('SET character_set_connection=utf8mb4')
+                    logger.info("Connected to MySQL database")
         except Error as e:
             logger.error(f"Error connecting to MySQL: {e}")
             raise
 
-    def disconnect(self):
-        if self._cursor:
-            self._cursor.close()
-        if self._connection and self._connection.is_connected():
-            self._connection.close()
-            logger.info("MySQL 接続を閉じました")
+    async def disconnect(self):
+        async with self._lock:
+            if self._cursor:
+                self._cursor.close()
+            if self._connection and self._connection.is_connected():
+                self._connection.close()
+                logger.info("Disconnected from MySQL database")
 
-    def execute_query(self, query: str, params: tuple = None) -> MySQLCursor:
+    async def execute_query(self, query: str, params: tuple = None) -> MySQLCursor:
         try:
-            self._cursor.execute(query, params)
-            return self._cursor
+            async with self._lock:
+                self._cursor.execute(query, params)
+                return self._cursor
         except Error as e:
             logger.error(f"Error executing query: {e}")
             raise
 
-    def commit(self):
-        self._connection.commit()
+    async def start_transaction(self):
+        try:
+            async with self._lock:
+                self._connection.start_transaction()
+                logger.info("Started new transaction")
+        except Error as e:
+            logger.error(f"Error starting transaction: {e}")
+            raise
 
-# Database Operations
+    async def commit(self):
+        try:
+            async with self._lock:
+                self._connection.commit()
+                logger.info("Committed transaction")
+        except Error as e:
+            logger.error(f"Error committing transaction: {e}")
+            raise
+
+    async def rollback(self):
+        try:
+            async with self._lock:
+                self._connection.rollback()
+                logger.info("Rolled back transaction")
+        except Error as e:
+            logger.error(f"Error rolling back transaction: {e}")
+            raise
+
 class MaterialsDB:
     def __init__(self, settings: Settings):
         self.settings = settings
         if not self.settings.OPENAI_API_KEY:
-            logger.error("OpenAI API Key is not set.")
-            raise ValueError("OpenAI API Key is required.")
+            logger.error("OpenAI API Key is not set")
+            raise ValueError("OpenAI API Key is required")
         openai.api_key = self.settings.OPENAI_API_KEY
 
-    def get_materials_by_unit(self, unit_id: int) -> Dict:
+    async def get_materials_by_unit(self, unit_id: int) -> Dict:
         query = """
         SELECT material_id, unit_id, title, description, material_type,
                blob_url, blob_name, file_size, duration, page_count, 
@@ -190,8 +224,8 @@ class MaterialsDB:
             END,
             created_at ASC
         """
-        with MySQLManager(self.settings.DB_CONFIG) as db:
-            cursor = db.execute_query(query, (unit_id,))
+        async with MySQLManager(self.settings.DB_CONFIG) as db:
+            cursor = await db.execute_query(query, (unit_id,))
             results = cursor.fetchall()
             if not results:
                 logger.info(f"No materials found for unit_id={unit_id}")
@@ -208,7 +242,7 @@ class MaterialsDB:
                     materials['pdfs'].append(MaterialResponse(**result))
             return materials
 
-    def get_material_by_id(self, material_id: int) -> MaterialResponse:
+    async def get_material_by_id(self, material_id: int) -> MaterialResponse:
         query = """
         SELECT material_id, unit_id, title, description, material_type,
                blob_url, blob_name, file_size, duration, page_count, 
@@ -216,38 +250,38 @@ class MaterialsDB:
         FROM lesson_materials 
         WHERE material_id = %s
         """
-        with MySQLManager(self.settings.DB_CONFIG) as db:
-            cursor = db.execute_query(query, (material_id,))
+        async with MySQLManager(self.settings.DB_CONFIG) as db:
+            cursor = await db.execute_query(query, (material_id,))
             result = cursor.fetchone()
             if not result:
                 logger.info(f"Material not found: material_id={material_id}")
                 raise HTTPException(status_code=404, detail="Material not found")
             return MaterialResponse(**result)
 
-    def get_default_unit_materials(self) -> Dict:
-        return self.get_materials_by_unit(1)
+    async def get_default_unit_materials(self) -> Dict:
+        return await self.get_materials_by_unit(1)
 
-    def get_current_unit(self, unit_id: int) -> LessonUnit:
+    async def get_current_unit(self, unit_id: int) -> LessonUnit:
         query = """
         SELECT unit_id, field_id, name, order_num, created_at
         FROM units 
         WHERE unit_id = %s
         """
-        with MySQLManager(self.settings.DB_CONFIG) as db:
-            cursor = db.execute_query(query, (unit_id,))
+        async with MySQLManager(self.settings.DB_CONFIG) as db:
+            cursor = await db.execute_query(query, (unit_id,))
             result = cursor.fetchone()
             if not result:
                 logger.info(f"Unit not found: unit_id={unit_id}")
                 raise HTTPException(status_code=404, detail="Unit not found")
             return LessonUnit(**result)
 
-    def get_chat_history(self) -> List[ChatConversation]:
+    async def get_chat_history(self) -> List[ChatConversation]:
         query = """
         SELECT * FROM ai_conversations 
         ORDER BY updated_at DESC
         """
-        with MySQLManager(self.settings.DB_CONFIG) as db:
-            cursor = db.execute_query(query)
+        async with MySQLManager(self.settings.DB_CONFIG) as db:
+            cursor = await db.execute_query(query)
             results = cursor.fetchall()
             if not results:
                 logger.info("No chat history found.")
@@ -265,30 +299,25 @@ class MaterialsDB:
                 logger.error(f"Error parsing chat history: {e}")
                 raise HTTPException(status_code=500, detail="Error fetching chat history")
 
-    def get_conversation_detail(self, conversation_id: int) -> ConversationDetail:
-        # 会話の基本情報を取得
+    async def get_conversation_detail(self, conversation_id: int) -> ConversationDetail:
         conversation_query = """
         SELECT * FROM ai_conversations 
         WHERE conversation_id = %s
         """
-        
-        # メッセージを取得
         messages_query = """
         SELECT * FROM messages 
         WHERE conversation_id = %s 
         ORDER BY created_at ASC
         """
         
-        with MySQLManager(self.settings.DB_CONFIG) as db:
-            # 会話情報の取得
-            cursor = db.execute_query(conversation_query, (conversation_id,))
+        async with MySQLManager(self.settings.DB_CONFIG) as db:
+            cursor = await db.execute_query(conversation_query, (conversation_id,))
             conversation_result = cursor.fetchone()
             if not conversation_result:
                 logger.info(f"Conversation not found: conversation_id={conversation_id}")
                 raise HTTPException(status_code=404, detail="Conversation not found")
             
-            # メッセージの取得
-            cursor = db.execute_query(messages_query, (conversation_id,))
+            cursor = await db.execute_query(messages_query, (conversation_id,))
             messages_result = cursor.fetchall()
             
             return ConversationDetail(
@@ -296,7 +325,7 @@ class MaterialsDB:
                 messages=[Message(**msg) for msg in messages_result]
             )
 
-    def create_conversation(self, user_id: int, unit_id: int) -> int:
+    async def create_conversation(self, user_id: int, unit_id: int) -> int:
         query = """
         INSERT INTO ai_conversations (
             user_id, unit_id, title, summary,
@@ -313,160 +342,280 @@ class MaterialsDB:
             %s, %s
         )
         """
-        # 初期値の設定
         default_title = '無題の会話'
         default_values = (
             user_id,
             unit_id,
-            default_title,   # title
-            'summary',            # summary
-            False,           # understanding_flag
-            False,           # is_public
-            0,               # view_count
-            0,               # like_count
-            0,               # bookmark_count
-            False,           # is_pinned
-            False,           # is_to_teacher
-            'chat',          # teacher_response_type
-            'waiting'        # teacher_response_status
+            default_title,
+            'summary',
+            False,          # understanding_flag
+            False,          # is_public
+            0,              # view_count
+            0,              # like_count
+            0,              # bookmark_count
+            False,          # is_pinned
+            False,          # is_to_teacher
+            'chat',         # teacher_response_type
+            'waiting'       # teacher_response_status
         )
 
-        with MySQLManager(self.settings.DB_CONFIG) as db:
-            db.execute_query(query, default_values)
-            db.commit()
-            conversation_id = db._cursor.lastrowid
-            logger.info(f"Created new conversation: conversation_id={conversation_id}")
-            return conversation_id
+        async with MySQLManager(self.settings.DB_CONFIG) as db:
+            try:
+                await db.start_transaction()
+                cursor = await db.execute_query(query, default_values)
+                conversation_id = cursor.lastrowid
+                await db.commit()
+                logger.info(f"Created new conversation: conversation_id={conversation_id}")
+                return conversation_id
+            except Exception as e:
+                await db.rollback()
+                logger.error(f"Error creating conversation: {e}")
+                raise HTTPException(status_code=500, detail=f"Failed to create conversation: {str(e)}")
 
-    def add_message(self, conversation_id: int, content: str, role: str):
-        query = """
-        INSERT INTO messages (conversation_id, content, role, created_at)
-        VALUES (%s, %s, %s, NOW())
+    # 新規追加メソッド群(分割対応)
+    async def add_user_message(self, conversation_id: Optional[int], content: str, user_id: int = 1, unit_id: int = 1) -> int:
         """
-        with MySQLManager(self.settings.DB_CONFIG) as db:
-            db.execute_query(query, (conversation_id, content, role))
-            db.commit()
-            logger.info(f"Added message to conversation_id={conversation_id}: role={role}")
-
-            # 会話の更新日時を更新
-            update_query = """
-            UPDATE ai_conversations
-            SET updated_at = NOW()
-            WHERE conversation_id = %s
-            """
-            db.execute_query(update_query, (conversation_id,))
-            db.commit()
-            logger.info(f"Updated conversation timestamp: conversation_id={conversation_id}")
-
-    def generate_conversation_title(self, conversation_id: int) -> str:
-        messages_query = """
-        SELECT content FROM messages WHERE conversation_id = %s ORDER BY created_at ASC
+        ユーザーメッセージをDBに追加する。
+        conversation_idがNoneなら新規にconversationを作成。
+        戻り値として使用したconversation_idを返す。
         """
-        with MySQLManager(self.settings.DB_CONFIG) as db:
-            cursor = db.execute_query(messages_query, (conversation_id,))
-            messages = [row['content'] for row in cursor.fetchall()]
+        if conversation_id is None:
+            # 新規会話作成
+            conversation_id = await self.create_conversation(user_id, unit_id)
 
-        try:
-            # 最新のChatCompletion APIを使用
-            messages_formatted = [
-                {"role": "system", "content": "以下の会話内容に基づいて、簡潔なタイトルを生成してください。"}
-            ]
-            for msg in messages:
-                messages_formatted.append({"role": "user", "content": msg})
+        async with MySQLManager(self.settings.DB_CONFIG) as db:
+            try:
+                await db.start_transaction()
+                message_query = """
+                INSERT INTO messages (conversation_id, content, role, created_at)
+                VALUES (%s, %s, 'user', NOW())
+                """
+                await db.execute_query(message_query, (conversation_id, content))
 
-            response = openai.ChatCompletion.create(
-                model="gpt-3.5-turbo",
-                messages=messages_formatted,
-                max_tokens=10,
-                temperature=0.7,
-            )
-            assistant_message = response['choices'][0]['message']['content'].strip()
-            title = assistant_message if assistant_message else "無題の会話"
-            logger.info(f"Generated title for conversation_id={conversation_id}: {title}")
-        except openai.error.OpenAIError as e:
-            logger.error(f"Error generating title: {e}")
-            title = "無題の会話"
+                # 会話の更新日時をアップデート
+                update_query = """
+                UPDATE ai_conversations
+                SET updated_at = NOW()
+                WHERE conversation_id = %s
+                """
+                await db.execute_query(update_query, (conversation_id,))
 
-        update_query = """
-        UPDATE ai_conversations SET title = %s WHERE conversation_id = %s
+                await db.commit()
+
+                logger.info(f"User message added to conversation_id={conversation_id}")
+                return conversation_id
+            except Exception as e:
+                await db.rollback()
+                logger.error(f"Error adding user message: {e}")
+                raise HTTPException(status_code=500, detail="Failed to add user message")
+
+    async def generate_assistant_response(self, conversation_id: int) -> str:
         """
-        with MySQLManager(self.settings.DB_CONFIG) as db:
-            db.execute_query(update_query, (title, conversation_id))
-            db.commit()
-            logger.info(f"Updated title for conversation_id={conversation_id}")
+        アシスタントメッセージを生成してDBに保存して返す
+        """
+        # ユーザーメッセージ履歴を取得
+        messages = await self._get_all_messages_for_conversation(conversation_id)
+        user_messages = [m for m in messages if m['role'] == 'user']
+
+        if not user_messages:
+            raise HTTPException(status_code=400, detail="No user messages in this conversation")
+
+        # チャット履歴をOpenAIに送信
+        assistant_message = await self._query_openai_for_assistant(user_messages)
+
+        # 生成されたアシスタントメッセージをDBに保存
+        await self._add_assistant_message(conversation_id, assistant_message)
+
+        return assistant_message
+
+    async def generate_conversation_title(self, conversation_id: int) -> str:
+        """
+        タイトルを生成して更新する
+        """
+        messages = await self._get_all_messages_for_conversation(conversation_id)
+        title = await self._generate_title_from_messages(conversation_id, messages)
+        # タイトル更新
+        async with MySQLManager(self.settings.DB_CONFIG) as db:
+            try:
+                await db.start_transaction()
+                update_title_query = """
+                UPDATE ai_conversations SET title = %s, updated_at=NOW() WHERE conversation_id = %s
+                """
+                await db.execute_query(update_title_query, (title, conversation_id))
+                await db.commit()
+            except Exception as e:
+                await db.rollback()
+                logger.error(f"Error updating title: {e}")
+                raise HTTPException(status_code=500, detail="Failed to update title")
 
         return title
 
-    def send_message(self, conversation_id: int, message: str) -> str:
+    async def _get_all_messages_for_conversation(self, conversation_id: int) -> List[Dict]:
+        query = """
+        SELECT message_id, conversation_id, content, role, created_at
+        FROM messages 
+        WHERE conversation_id = %s
+        ORDER BY created_at ASC
         """
-        OpenAI APIを使用してアシスタントのメッセージを生成し、データベースに保存します。
+        async with MySQLManager(self.settings.DB_CONFIG) as db:
+            cursor = await db.execute_query(query, (conversation_id,))
+            return cursor.fetchall()
+
+    async def _query_openai_for_assistant(self, user_messages: List[Dict]) -> str:
         """
+        最新のユーザーメッセージ内容に基づいてアシスタントメッセージを生成
+        """
+        # ユーザーメッセージをOpenAI用フォーマットに変換
+        # システムメッセージを1つ追加
+        messages_for_openai = [{"role": "system", "content": "あなたは高校1年生の物理を教える教師アシスタントです。わかりやすく、丁寧に説明してください。"}]
+        for msg in user_messages:
+            messages_for_openai.append({"role": "user", "content": msg['content']})
+
         try:
-            # 最新のChatCompletion APIを使用
-            response = openai.ChatCompletion.create(
+            response = await openai.ChatCompletion.acreate(
                 model="gpt-3.5-turbo",
-                messages=[
-                    {"role": "system", "content": "あなたは高校1年生の物理を教える教師アシスタントです。わかりやすく、丁寧に説明してください。"},
-                    {"role": "user", "content": message}
-                ],
+                messages=messages_for_openai,
                 max_tokens=150,
                 temperature=0.7,
             )
             assistant_message = response['choices'][0]['message']['content'].strip()
-            logger.info(f"Generated assistant message for conversation_id={conversation_id}")
+            return assistant_message
         except openai.error.OpenAIError as e:
             logger.error(f"OpenAI API Error: {e}")
-            raise HTTPException(status_code=500, detail="Error communicating with OpenAI")
+            raise HTTPException(status_code=500, detail="Error generating AI response")
         except Exception as e:
-            logger.error(f"Unexpected Error: {e}")
-            raise HTTPException(status_code=500, detail="Unexpected Error generating assistant response")
+            logger.error(f"Unexpected error: {e}")
+            raise HTTPException(status_code=500, detail="Unexpected error")
 
-        # アシスタントのメッセージをデータベースに保存
-        self.add_message(conversation_id, assistant_message, 'assistant')
-        return assistant_message
+    async def _add_assistant_message(self, conversation_id: int, content: str):
+        """
+        アシスタントメッセージをDBに追加
+        """
+        async with MySQLManager(self.settings.DB_CONFIG) as db:
+            try:
+                await db.start_transaction()
+                message_query = """
+                INSERT INTO messages (conversation_id, content, role, created_at)
+                VALUES (%s, %s, 'assistant', NOW())
+                """
+                await db.execute_query(message_query, (conversation_id, content))
 
-# FastAPI Application
-app = FastAPI(title="Techmagedon API")
+                # 会話の更新日時をアップデート
+                update_query = """
+                UPDATE ai_conversations
+                SET updated_at = NOW()
+                WHERE conversation_id = %s
+                """
+                await db.execute_query(update_query, (conversation_id,))
+
+                await db.commit()
+            except Exception as e:
+                await db.rollback()
+                logger.error(f"Error adding assistant message: {e}")
+                raise HTTPException(status_code=500, detail="Failed to add assistant message")
+
+    async def _generate_title_from_messages(self, conversation_id: int, messages: List[Dict]) -> str:
+        user_messages = [m for m in messages if m['role'] == 'user']
+        if not user_messages:
+            return "無題の会話"
+
+        try:
+            prompt_messages = [
+                {"role": "system", "content": "以下の会話内容に基づいて、簡潔なタイトルを生成してください。"}
+            ] + [{"role": "user", "content": msg['content']} for msg in user_messages]
+
+            response = await openai.ChatCompletion.acreate(
+                model="gpt-3.5-turbo",
+                messages=prompt_messages,
+                max_tokens=10,
+                temperature=0.7,
+            )
+            title = response['choices'][0]['message']['content'].strip()
+            logger.info(f"Generated title for conversation {conversation_id}: {title}")
+            return title or "無題の会話"
+        except Exception as e:
+            logger.error(f"Error generating title: {e}")
+            return "無題の会話"
+
+
+app = FastAPI(
+    title="Techmagedon API",
+    description="高校物理学習支援アプリケーションのバックエンドAPI",
+    version="1.0.0"
+)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # 必要に応じて制限
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Dependency
 def get_db(settings: Settings = Depends(get_settings)):
     return MaterialsDB(settings)
 
-# Material Endpoints
+
+# ---- Materials and Units endpoints (unchanged) ----
 @app.get("/materials/unit/{unit_id}", response_model=Dict)
-async def get_materials_by_unit(unit_id: int, db: MaterialsDB = Depends(get_db)):
-    """指定された単元IDに関連する教材を全て取得"""
-    return db.get_materials_by_unit(unit_id)
+async def get_materials_by_unit(
+    unit_id: int,
+    db: MaterialsDB = Depends(get_db)
+):
+    try:
+        return await db.get_materials_by_unit(unit_id)
+    except HTTPException as http_exc:
+        raise http_exc
+    except Exception as e:
+        logger.error(f"Unexpected error fetching materials: {e}")
+        raise HTTPException(status_code=500, detail="Unexpected error fetching materials")
 
 @app.get("/materials/{material_id}", response_model=MaterialResponse)
-async def get_material(material_id: int, db: MaterialsDB = Depends(get_db)):
-    """指定されたIDの教材を取得"""
-    return db.get_material_by_id(material_id)
+async def get_material(
+    material_id: int,
+    db: MaterialsDB = Depends(get_db)
+):
+    try:
+        return await db.get_material_by_id(material_id)
+    except HTTPException as http_exc:
+        raise http_exc
+    except Exception as e:
+        logger.error(f"Unexpected error fetching material: {e}")
+        raise HTTPException(status_code=500, detail="Unexpected error fetching material")
 
 @app.get("/materials/default", response_model=Dict)
-async def get_default_materials(db: MaterialsDB = Depends(get_db)):
-    """デフォルトの教材（unit_id=1）を取得"""
-    return db.get_default_unit_materials()
+async def get_default_materials(
+    db: MaterialsDB = Depends(get_db)
+):
+    try:
+        return await db.get_default_unit_materials()
+    except HTTPException as http_exc:
+        raise http_exc
+    except Exception as e:
+        logger.error(f"Unexpected error fetching default materials: {e}")
+        raise HTTPException(status_code=500, detail="Unexpected error fetching default materials")
 
 @app.get("/units/{unit_id}", response_model=LessonUnit)
-async def get_unit(unit_id: int, db: MaterialsDB = Depends(get_db)):
-    """指定された単元の情報を取得"""
-    return db.get_current_unit(unit_id)
-
-# Chat Endpoints
-@app.get("/chat/history", response_model=List[ChatConversation])
-async def get_chat_history(db: MaterialsDB = Depends(get_db)):
-    """チャット履歴一覧を取得"""
+async def get_unit(
+    unit_id: int,
+    db: MaterialsDB = Depends(get_db)
+):
     try:
-        return db.get_chat_history()
+        return await db.get_current_unit(unit_id)
+    except HTTPException as http_exc:
+        raise http_exc
+    except Exception as e:
+        logger.error(f"Unexpected error fetching unit: {e}")
+        raise HTTPException(status_code=500, detail="Unexpected error fetching unit")
+
+# ---- Chat endpoints ----
+
+@app.get("/chat/history", response_model=List[ChatConversation])
+async def get_chat_history(
+    db: MaterialsDB = Depends(get_db)
+):
+    try:
+        return await db.get_chat_history()
     except HTTPException as http_exc:
         raise http_exc
     except Exception as e:
@@ -474,61 +623,113 @@ async def get_chat_history(db: MaterialsDB = Depends(get_db)):
         raise HTTPException(status_code=500, detail="Unexpected error fetching chat history")
 
 @app.get("/chat/{conversation_id}", response_model=ConversationDetail)
-async def get_conversation_detail(conversation_id: int, db: MaterialsDB = Depends(get_db)):
-    """特定の会話の詳細を取得"""
-    return db.get_conversation_detail(conversation_id)
-
-@app.post("/chat/conversations", response_model=Dict)
-async def create_conversation(request: ConversationCreateRequest, db: MaterialsDB = Depends(get_db)):
-    """新しい会話を作成"""
+async def get_conversation_detail(
+    conversation_id: int,
+    db: MaterialsDB = Depends(get_db)
+):
     try:
-        conversation_id = db.create_conversation(request.user_id, request.unit_id)
-        return {"conversation_id": conversation_id}
-    except mysql.connector.Error as db_err:
-        # データベース関連のエラー
-        logger.error(f"Database Error: {db_err}")
-        raise HTTPException(status_code=500, detail=f"Database Error: {db_err}")
-    except Exception as e:
-        # その他のエラー
-        logger.error(f"Unexpected Error: {e}")
-        raise HTTPException(status_code=500, detail=f"Unexpected Error: {e}")
-
-@app.post("/chat/messages", response_model=Dict)
-async def add_message(request: MessageCreateRequest, db: MaterialsDB = Depends(get_db)):
-    """メッセージを追加"""
-    try:
-        db.add_message(request.conversation_id, request.content, request.role)
-        if request.role == 'user':
-            # ユーザーからのメッセージの場合、アシスタントの返信を生成
-            assistant_response = db.send_message(request.conversation_id, request.content)
-            return {"status": "success", "assistant_message": assistant_response}
-        return {"status": "success"}
-    except mysql.connector.Error as db_err:
-        # データベース関連のエラー
-        logger.error(f"Database Error: {db_err}")
-        raise HTTPException(status_code=500, detail=f"Database Error: {db_err}")
+        return await db.get_conversation_detail(conversation_id)
     except HTTPException as http_exc:
-        # OpenAI API関連のエラー
-        logger.error(f"HTTP Exception: {http_exc.detail}")
         raise http_exc
     except Exception as e:
-        # その他のエラー
-        logger.error(f"Unexpected Error: {e}")
-        raise HTTPException(status_code=500, detail=f"Unexpected Error: {e}")
+        logger.error(f"Unexpected error fetching conversation detail: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Unexpected error fetching conversation detail: {str(e)}"
+        )
 
-@app.post("/chat/conversations/{conversation_id}/generate_title", response_model=Dict)
-async def generate_title(conversation_id: int, db: MaterialsDB = Depends(get_db)):
-    """会話のタイトルを生成"""
+@app.post("/chat/conversations", response_model=Dict)
+async def create_conversation(
+    request: ConversationCreateRequest,
+    db: MaterialsDB = Depends(get_db)
+):
     try:
-        title = db.generate_conversation_title(conversation_id)
-        return {"title": title}
-    except mysql.connector.Error as db_err:
-        logger.error(f"Database Error: {db_err}")
-        raise HTTPException(status_code=500, detail=f"Database Error: {db_err}")
+        conversation_id = await db.create_conversation(request.user_id, request.unit_id)
+        return {"conversation_id": conversation_id}
+    except HTTPException as http_exc:
+        raise http_exc
     except Exception as e:
-        logger.error(f"Unexpected Error: {e}")
-        raise HTTPException(status_code=500, detail=f"Unexpected Error: {e}")
+        logger.error(f"Unexpected error creating conversation: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to create conversation: {str(e)}")
+
+# ユーザーメッセージを送るだけのエンドポイント
+@app.post("/chat/messages", response_model=Dict)
+async def add_user_message_endpoint(
+    request: MessageCreateRequest,
+    db: MaterialsDB = Depends(get_db)
+):
+    """
+    ユーザーメッセージをDBに保存するだけ。
+    AIの応答やタイトル生成は行わない。
+    """
+    try:
+        conv_id = request.conversation_id if request.conversation_id != 0 else None
+        used_conversation_id = await db.add_user_message(conv_id, request.content, user_id=1, unit_id=1)
+        return {"status": "user_message_stored", "conversation_id": used_conversation_id}
+    except HTTPException as http_exc:
+        raise http_exc
+    except Exception as e:
+        logger.error(f"Error adding user message: {e}")
+        raise HTTPException(status_code=500, detail="Failed to add user message")
+
+# アシスタントメッセージ生成専用エンドポイント
+@app.post("/chat/conversations/{conversation_id}/assistant_response", response_model=Dict)
+async def assistant_response_endpoint(
+    conversation_id: int,
+    db: MaterialsDB = Depends(get_db)
+):
+    """
+    アシスタントメッセージ生成・保存を行う
+    """
+    try:
+        assistant_msg = await db.generate_assistant_response(conversation_id)
+        return {"assistant_message": assistant_msg}
+    except HTTPException as http_exc:
+        raise http_exc
+    except Exception as e:
+        logger.error(f"Error generating assistant response: {e}")
+        raise HTTPException(status_code=500, detail="Failed to generate assistant response")
+
+# タイトル生成専用エンドポイント
+@app.post("/chat/conversations/{conversation_id}/title", response_model=Dict)
+async def generate_title_endpoint(
+    conversation_id: int,
+    db: MaterialsDB = Depends(get_db)
+):
+    """
+    会話タイトルを生成・更新して返す
+    """
+    try:
+        title = await db.generate_conversation_title(conversation_id)
+        return {"status": "title_generated", "title": title}
+    except HTTPException as http_exc:
+        raise http_exc
+    except Exception as e:
+        logger.error(f"Error generating title: {e}")
+        raise HTTPException(status_code=500, detail="Failed to generate title")
+
+@app.get("/health")
+async def health_check():
+    """APIの健康状態を確認"""
+    return {
+        "status": "healthy",
+        "timestamp": datetime.now().isoformat()
+    }
+
+@app.on_event("startup")
+async def startup_event():
+    logger.info("Starting up Techmagedon API")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    logger.info("Shutting down Techmagedon API")
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=8000,
+        log_level="info",
+        reload=True
+    )

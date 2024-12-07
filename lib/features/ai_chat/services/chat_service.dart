@@ -1,32 +1,34 @@
 // lib/features/ai_chat/services/chat_service.dart
 
 import 'dart:convert';
+import 'dart:developer' as developer;
 import 'package:http/http.dart' as http;
+import 'package:flutter_dotenv/flutter_dotenv.dart';
+
 import '../models/chat_message.dart';
 import '../models/chat_history.dart';
 
 class ChatService {
   final String apiKey;
-  static const String _baseUrl = 'http://localhost:8000'; // バックエンドのURL
+  static const String _baseUrl = 'http://localhost:8000';
 
   int? _currentConversationId;
 
-  // パブリックなゲッターとセッターを追加
   int? get currentConversationId => _currentConversationId;
 
   set currentConversationId(int? value) {
     _currentConversationId = value;
   }
 
-  // 未使用の初期選択肢を保持するためのSet
   final Set<String> _unusedInitialRecommendations = {};
 
   ChatService({required this.apiKey}) {
-    // 初期化時に未使用の選択肢をセットする
+    if (apiKey.isEmpty) {
+      throw ArgumentError('API key cannot be empty');
+    }
     _unusedInitialRecommendations.addAll(initialRecommendations);
   }
 
-  // 初回の選択肢
   final List<String> initialRecommendations = [
     "加速度の意味について",
     "加速度の数式について",
@@ -34,7 +36,6 @@ class ChatService {
     "等加速度直線運動の数式について",
   ];
 
-  // 2回目以降の固定選択肢
   final List<String> followUpRecommendations = [
     "もっと詳しく教えて",
     "先生に質問する",
@@ -52,25 +53,20 @@ class ChatService {
     return "お役に立てて光栄です！\n今回の学びを「みんなの教習」に追加しますか？";
   }
 
-  // 選択された選択肢を記録するメソッド
   void markRecommendationAsUsed(String recommendation) {
     _unusedInitialRecommendations.remove(recommendation);
   }
 
-  // 現在の状況に応じた選択肢を取得するメソッド
   List<String> getCurrentRecommendations(bool isFirstMessage, String? selectedRecommendation) {
     if (isFirstMessage) {
       return initialRecommendations;
     } else {
-      // 2回目以降は固定の選択肢と未使用の初期選択肢を組み合わせる
       List<String> currentRecommendations = List.from(followUpRecommendations);
 
-      // 未使用の初期選択肢を追加（選択された選択肢は除外）
       if (selectedRecommendation != null) {
         markRecommendationAsUsed(selectedRecommendation);
       }
 
-      // 未使用の初期選択肢を追加（最大2つまで）
       final unusedRecommendations = _unusedInitialRecommendations.take(2).toList();
       currentRecommendations.insertAll(0, unusedRecommendations);
 
@@ -78,76 +74,118 @@ class ChatService {
     }
   }
 
-  // 新しい会話を作成するメソッド
   Future<int> createConversation(int userId, int unitId) async {
-    final response = await http.post(
-      Uri.parse('$_baseUrl/chat/conversations'),
-      headers: {
-        'Content-Type': 'application/json; charset=UTF-8',
-      },
-      body: jsonEncode({
-        'user_id': userId,
-        'unit_id': unitId,
-      }),
-    );
+    try {
+      developer.log('Creating new conversation for user $userId in unit $unitId');
 
-    if (response.statusCode == 200) {
-      final data = jsonDecode(response.body);
-      _currentConversationId = data['conversation_id'];
-      return _currentConversationId!;
-    } else {
-      throw Exception('Failed to create conversation');
+      final response = await http.post(
+        Uri.parse('$_baseUrl/chat/conversations'),
+        headers: {
+          'Content-Type': 'application/json; charset=UTF-8',
+        },
+        body: jsonEncode({
+          'user_id': userId,
+          'unit_id': unitId,
+        }),
+      );
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        _currentConversationId = data['conversation_id'];
+        developer.log('Created conversation with ID: $_currentConversationId');
+        return _currentConversationId!;
+      } else {
+        throw Exception(
+            'Failed to create conversation. Status code: ${response.statusCode}, '
+                'Response: ${response.body}'
+        );
+      }
+    } catch (e) {
+      developer.log('Error creating conversation', error: e);
+      rethrow;
     }
   }
 
-  // メッセージを追加するメソッド
-  Future<void> addMessage(int conversationId, String content, String role) async {
-    final response = await http.post(
-      Uri.parse('$_baseUrl/chat/messages'),
-      headers: {
-        'Content-Type': 'application/json; charset=UTF-8',
-      },
-      body: jsonEncode({
-        'conversation_id': conversationId,
-        'content': content,
-        'role': role,
-      }),
-    );
+  Future<void> addMessage(
+      int conversationId,
+      String content,
+      String role, {
+        bool isFirstMessage = false
+      }) async {
+    try {
+      developer.log('Adding message to conversation $conversationId');
 
-    if (response.statusCode != 200) {
-      throw Exception('Failed to add message');
+      final response = await http.post(
+        Uri.parse('$_baseUrl/chat/messages'),
+        headers: {
+          'Content-Type': 'application/json; charset=UTF-8',
+        },
+        body: jsonEncode({
+          'conversation_id': conversationId,
+          'content': content,
+          'role': role,
+          'is_first_message': isFirstMessage
+        }),
+      );
+
+      if (response.statusCode != 200) {
+        throw Exception(
+            'Failed to add message. Status code: ${response.statusCode}, '
+                'Response: ${response.body}'
+        );
+      }
+      developer.log('Successfully added message to conversation $conversationId');
+    } catch (e) {
+      developer.log('Error adding message', error: e);
+      rethrow;
     }
   }
 
-  // タイトルを生成するメソッド
   Future<String> generateTitle(int conversationId) async {
-    final response = await http.post(
-      Uri.parse('$_baseUrl/chat/conversations/$conversationId/generate_title'),
-      headers: {
-        'Content-Type': 'application/json; charset=UTF-8',
-      },
-    );
+    try {
+      developer.log('Generating title for conversation $conversationId');
 
-    if (response.statusCode == 200) {
-      final data = jsonDecode(response.body);
-      return data['title'];
-    } else {
-      throw Exception('Failed to generate title');
+      final response = await http.post(
+        Uri.parse('$_baseUrl/chat/conversations/$conversationId/title'),
+        headers: {
+          'Content-Type': 'application/json; charset=UTF-8',
+        },
+      );
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        final title = data['title'] as String;
+        developer.log('Generated title: $title');
+        return title;
+      } else {
+        throw Exception(
+            'Failed to generate title. Status code: ${response.statusCode}, '
+                'Response: ${response.body}'
+        );
+      }
+    } catch (e) {
+      developer.log('Error generating title', error: e);
+      rethrow;
     }
   }
 
-  // メッセージを送信するメソッド
+  /// 旧フロー(一括処理用)メソッド: sendMessage
+  /// 新フローでは使用しないが、既存機能維持のため残す
   Future<Map<String, dynamic>> sendMessage(String message, bool isFirstMessage) async {
     try {
-      // 会話の作成または既存の会話IDを使用
+      developer.log('Sending message. isFirstMessage: $isFirstMessage');
+
       if (_currentConversationId == null) {
-        await createConversation(1, 1); // ユーザーIDとユニットIDは適宜設定
+        await createConversation(1, 1);
       }
 
-      // ユーザーメッセージをバックエンドに保存
-      await addMessage(_currentConversationId!, message, 'user');
+      await addMessage(
+          _currentConversationId!,
+          message,
+          'user',
+          isFirstMessage: isFirstMessage
+      );
 
-      // OpenAI APIへのリクエスト
       final List<Map<String, String>> messages = [
         {
           'role': 'system',
@@ -177,15 +215,17 @@ class ChatService {
         final data = jsonDecode(utf8.decode(response.bodyBytes));
         final content = data['choices'][0]['message']['content'];
 
-        // アシスタントの応答をバックエンドに保存
-        await addMessage(_currentConversationId!, content, 'assistant');
+        await addMessage(
+            _currentConversationId!,
+            content,
+            'assistant',
+            isFirstMessage: isFirstMessage
+        );
 
-        // タイトルの生成（初回メッセージの場合）
         if (isFirstMessage) {
           await generateTitle(_currentConversationId!);
         }
 
-        // メッセージに応じた選択肢を取得
         final recommendations = getCurrentRecommendations(isFirstMessage, message);
 
         return {
@@ -193,16 +233,21 @@ class ChatService {
           'recommendations': recommendations,
         };
       } else {
-        throw Exception('応答の取得に失敗しました: ${response.statusCode}');
+        throw Exception(
+            'Failed to get AI response. Status code: ${response.statusCode}, '
+                'Response: ${response.body}'
+        );
       }
     } catch (e) {
-      throw Exception('メッセージの送信に失敗しました: $e');
+      developer.log('Error sending message', error: e);
+      rethrow;
     }
   }
 
-  // チャット履歴を取得するメソッド
   Future<List<ChatHistory>> getChatHistory() async {
     try {
+      developer.log('Fetching chat history');
+
       final response = await http.get(
         Uri.parse('$_baseUrl/chat/history'),
         headers: {
@@ -214,18 +259,25 @@ class ChatService {
       if (response.statusCode == 200) {
         final String decodedBody = utf8.decode(response.bodyBytes);
         final List<dynamic> data = json.decode(decodedBody);
-        return data.map((json) => ChatHistory.fromJson(json)).toList();
+        final history = data.map((json) => ChatHistory.fromJson(json)).toList();
+        developer.log('Successfully fetched ${history.length} chat histories');
+        return history;
       } else {
-        throw Exception('Failed to load chat history: ${response.statusCode}');
+        throw Exception(
+            'Failed to load chat history. Status code: ${response.statusCode}, '
+                'Response: ${response.body}'
+        );
       }
     } catch (e) {
-      throw Exception('Error fetching chat history: $e');
+      developer.log('Error fetching chat history', error: e);
+      rethrow;
     }
   }
 
-  // 会話の詳細を取得するメソッド
   Future<ChatHistoryDetail> getConversationDetail(int conversationId) async {
     try {
+      developer.log('Fetching conversation detail for ID: $conversationId');
+
       final response = await http.get(
         Uri.parse('$_baseUrl/chat/$conversationId'),
         headers: {
@@ -237,12 +289,69 @@ class ChatService {
       if (response.statusCode == 200) {
         final decodedBody = utf8.decode(response.bodyBytes);
         final data = json.decode(decodedBody);
-        return ChatHistoryDetail.fromJson(data);
+        final detail = ChatHistoryDetail.fromJson(data);
+        developer.log('Successfully fetched conversation detail');
+        return detail;
       } else {
-        throw Exception('Failed to load conversation: ${response.statusCode}');
+        throw Exception(
+            'Failed to load conversation. Status code: ${response.statusCode}, '
+                'Response: ${response.body}'
+        );
       }
     } catch (e) {
-      throw Exception('Error fetching conversation: $e');
+      developer.log('Error fetching conversation detail', error: e);
+      rethrow;
+    }
+  }
+
+  // --- 新フロー用メソッド ---
+  /// 新フロー: ユーザーメッセージのみ送信して会話IDを取得
+  Future<Map<String, dynamic>> sendUserMessage({int? conversationId, required String content}) async {
+    final body = {
+      'conversation_id': conversationId ?? 0,
+      'content': content,
+      'role': 'user',
+      'is_first_message': false,
+    };
+    final response = await http.post(
+      Uri.parse('$_baseUrl/chat/messages'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode(body),
+    );
+    if (response.statusCode == 200) {
+      final data = jsonDecode(response.body);
+      _currentConversationId = data['conversation_id'];
+      return data;
+    } else {
+      throw Exception('Failed to store user message');
+    }
+  }
+
+  /// 新フロー: アシスタントメッセージ取得
+  Future<String> fetchAssistantResponse(int conversationId) async {
+    final response = await http.post(
+      Uri.parse('$_baseUrl/chat/conversations/$conversationId/assistant_response'),
+      headers: {'Content-Type': 'application/json'},
+    );
+    if (response.statusCode == 200) {
+      final data = jsonDecode(response.body);
+      return data['assistant_message'];
+    } else {
+      throw Exception('Failed to fetch assistant response');
+    }
+  }
+
+  /// 新フロー: タイトル生成取得
+  Future<String> fetchGeneratedTitle(int conversationId) async {
+    final response = await http.post(
+      Uri.parse('$_baseUrl/chat/conversations/$conversationId/title'),
+      headers: {'Content-Type': 'application/json'},
+    );
+    if (response.statusCode == 200) {
+      final data = jsonDecode(response.body);
+      return data['title'];
+    } else {
+      throw Exception('Failed to fetch title');
     }
   }
 }

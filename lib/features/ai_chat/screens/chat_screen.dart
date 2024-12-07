@@ -27,10 +27,13 @@ class _ChatScreenState extends State<ChatScreen> {
   List<ChatHistory> _conversations = [];
   ChatHistory? _currentConversation;
   bool _isLoadingHistory = false;
+  String _conversationTitle = '無題の会話'; // タイトルを表示するための変数
+  int? _currentConversationId; // 追加: 会話IDを管理する変数
 
   @override
   void initState() {
     super.initState();
+    // .envからAPIキーを読み込み、ChatServiceに渡す
     _chatService = ChatService(apiKey: dotenv.env['OPENAI_API_KEY'] ?? '');
     _loadInitialMessage();
     _loadChatHistory();
@@ -101,6 +104,8 @@ class _ChatScreenState extends State<ChatScreen> {
       _isLoading = true;
       _currentConversation = conversation;
       _chatService.currentConversationId = conversation.conversationId; // 会話IDをセット
+      _currentConversationId = conversation.conversationId; // 追加: 会話IDをセット
+      _conversationTitle = conversation.title ?? '無題の会話'; // タイトルをセット
     });
 
     try {
@@ -115,6 +120,7 @@ class _ChatScreenState extends State<ChatScreen> {
         _messages.addAll(conversationDetail.messages);
         _isFirstMessage = false;
         _isLoading = false;
+        _conversationTitle = conversationDetail.conversation.title ?? '無題の会話';
       });
 
       await _scrollToBottom();
@@ -124,6 +130,7 @@ class _ChatScreenState extends State<ChatScreen> {
       setState(() {
         _isLoading = false;
         _messages.clear();
+        _conversationTitle = '無題の会話';
       });
       await _loadInitialMessage();
 
@@ -220,12 +227,13 @@ class _ChatScreenState extends State<ChatScreen> {
       ));
       _messageController.clear();
       _isLoading = true;
-      _isFirstMessage = false; // ここでフラグを更新
+      // _isFirstMessage = false; // この行をコメントアウトまたは削除
     });
 
     await _scrollToBottom();
 
     try {
+      // 既存機能であるsendMessageメソッドを利用
       final response = await _chatService.sendMessage(userMessage, _isFirstMessage);
 
       if (!mounted) return;
@@ -244,6 +252,15 @@ class _ChatScreenState extends State<ChatScreen> {
       await _loadChatHistory();
 
       await _scrollToBottom();
+
+      // タイトル生成のトリガー
+      if (_isFirstMessage) {
+        final title = await _chatService.fetchGeneratedTitle(_currentConversationId!);
+        setState(() {
+          _conversationTitle = title;
+        });
+        _isFirstMessage = false;
+      }
     } catch (e) {
       if (!mounted) return;
 
@@ -330,18 +347,17 @@ class _ChatScreenState extends State<ChatScreen> {
             ),
           ),
           const Spacer(),
-          if (_currentConversation != null)
-            Expanded(
-              child: Text(
-                _currentConversation!.title ?? '無題の会話',
-                style: const TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.w500,
-                ),
-                textAlign: TextAlign.center,
-                overflow: TextOverflow.ellipsis,
+          Expanded(
+            child: Text(
+              _conversationTitle,
+              style: const TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.w500,
               ),
+              textAlign: TextAlign.center,
+              overflow: TextOverflow.ellipsis,
             ),
+          ),
           const Spacer(),
           IconButton(
             icon: const Icon(Icons.refresh),
@@ -392,6 +408,9 @@ class _ChatScreenState extends State<ChatScreen> {
             _currentConversation = null;
             _messages.clear();
             _chatService.currentConversationId = null; // 会話IDをリセット
+            _currentConversationId = null; // 追加: 会話IDをリセット
+            _conversationTitle = '無題の会話'; // タイトルをリセット
+            _isFirstMessage = true; // フラグをリセット
           });
           _loadInitialMessage();
           return false;
